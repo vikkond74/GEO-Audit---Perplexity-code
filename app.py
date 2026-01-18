@@ -2,124 +2,131 @@ import streamlit as st
 import asyncio
 import httpx
 from bs4 import BeautifulSoup
-from openai import AsyncOpenAI
+import requests
 import tldextract
+import json
 
-# Page config
-st.set_page_config(page_title="🧠 GEO Audit", layout="wide")
+st.set_page_config(page_title="🧠 Perplexity GEO Audit", layout="wide")
 
-# Config
-client = AsyncOpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
+st.title("🧠 GEO Audit with Perplexity API")
+st.markdown("Uses Perplexity's Sonar models with citations for authoritative GEO analysis.")
 
-st.title("🧠 Generative Engine Optimization Audit")
-st.markdown("Enter a domain → get GEO analysis powered by AI.")
-
-# Sidebar
+# Sidebar for Perplexity API key
 with st.sidebar:
-    st.header("🔑 OpenAI API Key")
-    api_key = st.text_input("Paste your key", type="password", help="Required")
+    st.header("🔑 Perplexity API Key")
+    api_key = st.text_input("From perplexity.ai/settings/api", type="password", 
+                           help="Settings → API tab → Generate API Key")
     if api_key:
-        st.secrets["OPENAI_API_KEY"] = api_key
-        st.success("✅ Saved!")
+        st.secrets["PERPLEXITY_API_KEY"] = api_key
+        st.success("✅ Ready!")
         st.rerun()
-    else:
-        st.warning("⚠️ Add key first")
+    st.info("Get key: [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api)")
 
-# Main app
-if "results" not in st.session_state:
-    st.session_state.results = None
-
-col1, col2 = st.columns([2, 1])
+# Main inputs
+col1, col2 = st.columns(2)
 with col1:
-    domain_input = st.text_input("Domain (e.g. perplexity.ai)", value="perplexity.ai")
+    domain = st.text_input("Domain", value="perplexity.ai")
 with col2:
-    if st.button("🚀 Run Audit", type="primary", use_container_width=True):
-        st.session_state.results = "running"
+    model = st.selectbox("Sonar Model", ["sonar-small-online", "sonar-medium-online", "llama-3.1-sonar-small-128k-online"])
 
-if st.session_state.results == "running" and st.secrets.get("OPENAI_API_KEY"):
-    try:
-        # Resolve domain
-        if not domain_input.startswith("http"):
-            domain_url = f"https://{domain_input.strip()}"
-        else:
-            domain_url = domain_input.strip()
-
-        # Async fetch (wrapped properly)
-        @st.cache_data(ttl=300)
-        def fetch_pages(url):
-            async def _fetch():
-                urls = [url, f"{url.rstrip('/')}/about", f"{url.rstrip('/')}/blog"]
-                async with httpx.AsyncClient(follow_redirects=True) as client:
-                    results = await asyncio.gather(*[client.get(u, timeout=10) for u in urls], return_exceptions=True)
-                    return [(u, r.text if not isinstance(r, Exception) else None) for u, r in zip(urls, results)]
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_fetch())
-
-        page_data = fetch_pages(domain_url)
-        page_signals = []
-
-        for url, html in page_data:
-            if html:
-                soup = BeautifulSoup(html, "html.parser")
-                page_signals.append({
-                    "url": url,
-                    "title": soup.title.get_text(strip=True) if soup.title else "No title",
-                    "h1_count": len(soup.find_all("h1")),
-                    "schema_count": len(soup.find_all("script", {"type": "application/ld+json"})),
-                    "has_faq": bool(soup.find("details") or soup.find_all(string=lambda t: "faq" in t.lower())),
-                    "word_count": len(soup.get_text().split())
-                })
-
-        # Domain info
-        domain_info = tldextract.extract(domain_url)
+if st.button("🚀 Run Perplexity GEO Audit", type="primary") and st.secrets.get("PERPLEXITY_API_KEY"):
+    
+    # Step 1: Quick page crawl
+    @st.cache_data(ttl=600)
+    def crawl_domain(url):
+        async def fetch_pages():
+            base = url.rstrip('/')
+            urls = [base, f"{base}/about", f"{base}/blog", f"{base.rstrip('/')}/pricing"]
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                results = await asyncio.gather(*[client.get(u) for u in urls[:4]], return_exceptions=True)
+                return [(u, r.text if not isinstance(r, Exception) else None) for u, r in zip(urls[:4], results)]
         
-        # LLM audit
-        @st.cache_data(ttl=1800)
-        def get_geo_audit(domain_url, page_signals, domain_info):
-            messages = [{
-                "role": "user", 
-                "content": f"""
-GEO Audit Request:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(fetch_pages())
+
+    if not domain.startswith("http"):
+        domain_url = f"https://{domain}"
+    else:
+        domain_url = domain
+
+    with st.spinner("🔍 Crawling site..."):
+        pages = crawl_domain(domain_url)
+    
+    # Extract signals
+    signals = []
+    for url, html in pages:
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            signals.append({
+                "url": url,
+                "title": soup.title.get_text(strip=True)[:100] if soup.title else "No title",
+                "h1s": len(soup.find_all("h1")),
+                "schema": len(soup.find_all("script", {"type": "application/ld+json"})),
+                "faq": bool(soup.find(string=lambda t: "faq" in (t or "").lower())),
+                "meta_desc": bool(soup.find("meta", {"name": "description"}))
+            })
+
+    domain_info = tldextract.extract(domain_url)
+
+    # Step 2: Perplexity API call
+    with st.spinner("🤖 Perplexity analyzing..."):
+        headers = {
+            "Authorization": f"Bearer {st.secrets['PERPLEXITY_API_KEY']}",
+            "Content-Type": "application/json"
+        }
+        
+        prompt = f"""
+Perform a **Generative Engine Optimization (GEO) audit** for:
 
 Domain: {domain_url}
-Domain info: {domain_info._asdict()}
-Pages analyzed: {len(page_signals)}
+TLD: {domain_info.suffix}
+Pages crawled: {len(signals)}
 
 Page signals:
-{chr(10).join([f"- {p['url']}: schema={p['schema_count']}, H1s={p['h1_count']}, words={p['word_count']}, FAQ={p['has_faq']}" for p in page_signals])}
+{json.dumps(signals, indent=2)}
 
-Give:
-1. GEO readiness score (1-10)
-2. 3 critical issues
-3. 5 prioritized fixes
-                """
-            }]
+**Output format:**
+1. **GEO Score (1-10):** [score]
+2. **Strengths:** [2-3 bullet points]
+3. **Critical Issues:** [3-5 bullet points]  
+4. **Priority Fixes:** [5 numbered recommendations with specific actions]
+5. **Citations:** Use web search for GEO best practices
+
+Focus on: schema markup, FAQ patterns, entity clarity, answerability, structured data for LLMs.
+        """
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 2000,
+            "temperature": 0.3
+        }
+
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions", 
+            headers=headers, 
+            json=payload
+        )
+        
+        if resp.status_code == 200:
+            result = resp.json()
+            audit = result["choices"][0]["message"]["content"]
             
-            resp = client.chat.completions.create(model="gpt-4o-mini", messages=messages, max_tokens=1000)
-            return resp.choices[0].message.content
+            st.subheader("📊 Perplexity GEO Audit")
+            st.markdown(audit)
+            
+            # Raw signals
+            st.subheader("🔍 Page Data")
+            st.json(signals)
+            
+            st.subheader("🌐 Domain Info")
+            st.json({"domain": domain_info.domain, "tld": domain_info.suffix})
+            
+        else:
+            st.error(f"API Error {resp.status_code}: {resp.text}")
+else:
+    st.info("👈 Add Perplexity API key to run audit")
 
-        geo_report = get_geo_audit(domain_url, page_signals, domain_info)
-
-        # Display results
-        st.session_state.results = "done"
-
-        st.subheader("🤖 GEO Audit Report")
-        st.markdown(geo_report)
-
-        st.subheader("📊 Page Analysis")
-        for signal in page_signals:
-            with st.expander(signal["url"]):
-                st.json(signal)
-
-        st.subheader("🔍 Domain")
-        st.json({"domain": domain_info.domain, "tld": domain_info.suffix})
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-        st.exception(e)
-        st.session_state.results = None
-
-elif not st.secrets.get("OPENAI_API_KEY"):
-    st.info("👈 Add your OpenAI API key in the sidebar to start!")
+st.markdown("---")
+st.caption("Powered by [Perplexity Sonar API](https://www.perplexity.ai/settings/api) | Pro users get $5/mo free credit")
