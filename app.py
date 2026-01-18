@@ -4,108 +4,108 @@ import httpx
 from bs4 import BeautifulSoup
 import requests
 import tldextract
-import json
 
 st.set_page_config(page_title="🧠 Perplexity GEO Audit", layout="wide")
 
-st.title("🧠 GEO Audit - Perplexity Edition")
-st.markdown("Domain → Perplexity Sonar analysis → Actionable GEO recommendations")
+st.title("🧠 GEO Audit - Perplexity Sonar")
+st.markdown("Domain analysis → Perplexity AI audit → Actionable recommendations")
 
-# API Key input (session state instead of secrets write)
+# Session state for API key
 if "api_key" not in st.session_state:
     st.session_state.api_key = ""
 
 with st.sidebar:
-    st.header("🔑 Perplexity API")
-    new_key = st.text_input("API Key", value=st.session_state.api_key, type="password",
-                           help="perplexity.ai/settings/api → Generate")
-    if st.button("✅ Save Key") or new_key != st.session_state.api_key:
+    st.header("🔑 Perplexity API Key")
+    new_key = st.text_input("Paste key here", value=st.session_state.api_key, type="password")
+    if st.button("Save Key") or new_key != st.session_state.api_key:
         st.session_state.api_key = new_key
         st.rerun()
     
     if st.session_state.api_key:
-        st.success("✅ Key loaded")
-        st.caption("Sonar models: web search + citations")
+        st.success("✅ Ready to audit!")
     else:
-        st.warning("⚠️ Add key to run audits")
+        st.warning("Add key first")
 
-# Main UI
-col1, col2 = st.columns([3, 1])
+col1, col2 = st.columns([3,1])
 with col1:
     domain = st.text_input("Domain", value="perplexity.ai")
 with col2:
-    model = st.selectbox("Model", 
-                        ["sonar-small-online", "sonar-medium-online", "llama-3.1-sonar-small-128k-online"])
+    model = st.selectbox("Model", ["sonar-small-online", "sonar-medium-online"])
 
-if st.button("🚀 Run Perplexity GEO Audit", type="primary") and st.session_state.api_key:
+if st.button("🚀 Run Audit", type="primary") and st.session_state.api_key:
     
+    # Normalize URL
     if not domain.startswith("http"):
-        domain_url = f"https://{domain.strip()}"
+        url = f"https://{domain.strip()}"
     else:
-        domain_url = domain.strip()
+        url = domain.strip()
 
-    # 1. Crawl (cached)
+    # 1. Crawl pages
     @st.cache_data(ttl=600)
-    def crawl_site(url):
+    def get_pages(base_url):
         async def fetch():
-            base = url.rstrip('/')
-            urls = [base, f"{base}/about", f"{base}/blog", f"{base}/pricing"][:4]
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            paths = ["", "/about", "/blog", "/pricing"][:3]
+            urls = [f"{base_url.rstrip('/')}{p}" for p in paths]
+            async with httpx.AsyncClient(timeout=10) as client:
                 results = await asyncio.gather(*[client.get(u) for u in urls], return_exceptions=True)
                 return [(u, r.text if not isinstance(r, Exception) else None) for u, r in zip(urls, results)]
-        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(fetch())
 
-    with st.spinner("🔍 Analyzing site structure..."):
-        pages = crawl_site(domain_url)
-        signals = []
-        
-        for url, html in pages:
-            if html:
-                soup = BeautifulSoup(html, "html.parser")
-                signals.append({
-                    "url": url,
-                    "title": soup.title.get_text(strip=True)[:80] if soup.title else "No title",
-                    "h1_count": len(soup.find_all("h1")),
-                    "schema_count": len(soup.find_all("script", {"type": "application/ld+json"})),
-                    "has_faq": len([t for t in soup.stripped_strings if "faq" in t.lower()]) > 0,
-                    "meta_desc": bool(soup.find("meta", {"name": "description"})),
-                    "word_count": len(soup.get_text().split())
-                })
+    pages = get_pages(url)
+    signals = []
+    
+    for page_url, html in pages:
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            signals.append({
+                "url": page_url,
+                "title": soup.title.get_text(strip=True)[:60] if soup.title else "?",
+                "h1s": len(soup.find_all("h1")),
+                "schema": len(soup.find_all("script", type="application/ld+json")),
+                "faq": "faq" in soup.get_text().lower(),
+                "desc": bool(soup.find("meta", attrs={"name": "description"}))
+            })
 
-    domain_parts = tldextract.extract(domain_url)
+    # Domain parse
+    domain_info = tldextract.extract(url)
+    domain_dict = {
+        "domain": domain_info.domain,
+        "tld": domain_info.suffix,
+        "subdomain": domain_info.subdomain or "none"
+    }
 
-    # 2. Perplexity API
+    # 2. Perplexity call
     @st.cache_data(ttl=1800)
-    def perplexity_geo_audit(domain_url, signals, model_choice):
+    def call_perplexity(full_url, sigs, model_name, api_key, dom_info):
         headers = {
-            "Authorization": f"Bearer {st.session_state.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         
-        prompt = f"""**GEO Audit for {domain_url}**
+        prompt = f"""**GEO Audit Request**
 
-Domain info: {domain_parts._asdict()}
-Pages analyzed: {len(signals)}
+Site: {full_url}
+Domain: {dom_info['domain']}.{dom_info['tld']}
+Pages: {len(sigs)}
 
-Page signals:
-{json.dumps(signals, indent=2)}
+Signals:
+{str(sigs)}
 
-**Required output:**
-1. **GEO Score (1-10):** 
-2. **Strengths** (2 bullets)
-3. **Critical Issues** (3-5 bullets)  
-4. **Priority Fixes** (5 numbered, specific actions like "Add FAQ schema to /pricing")
-5. **Web citations** for recommendations
+**Format:**
+1. GEO Score (1-10)
+2. Strengths (2 bullets)  
+3. Issues (3-5 bullets)
+4. Fixes (5 numbered actions)
+5. Cite GEO sources
 
-GEO focus: schema, FAQs, entity clarity, LLM answerability, structured data."""
+Focus: schema, FAQ structure, entity signals for LLMs."""
 
         payload = {
-            "model": model_choice,
+            "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1800,
+            "max_tokens": 1500,
             "temperature": 0.2
         }
 
@@ -114,33 +114,27 @@ GEO focus: schema, FAQs, entity clarity, LLM answerability, structured data."""
         
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"]
-        return f"API Error {resp.status_code}: {resp.text[:200]}"
+        return f"Error {resp.status_code}"
 
-    with st.spinner("🤖 Perplexity Sonar analyzing..."):
-        geo_report = perplexity_geo_audit(domain_url, signals, model)
+    with st.spinner("🤖 Perplexity analyzing..."):
+        report = call_perplexity(url, signals, model, st.session_state.api_key, domain_dict)
 
-    # Results
+    # Results layout
     st.subheader("📊 Perplexity GEO Report")
-    st.markdown(geo_report)
+    st.markdown(report)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("🔍 Page Signals")
-        st.json(signals)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📈 Page Metrics")
+        for sig in signals:
+            st.metric(sig["url"][-30:], f"H1: {sig['h1s']}", f"Schema: {sig['schema']}")
     
-    with c2:
-        st.subheader("🌐 Domain")
-        st.json({
-            "domain": domain_parts.domain,
-            "tld": domain_parts.suffix,
-            "subdomain": domain_parts.subdomain or "none"
-        })
-
-    st.balloons()
+    with col2:
+        st.subheader("🔍 Domain Info")
+        st.json(domain_dict)
 
 else:
     st.info("👈 Enter Perplexity API key → Run audit")
-    st.markdown("[Get API key](https://www.perplexity.ai/settings/api)")
 
 st.markdown("---")
-st.caption("🦾 Perplexity Pro = $5/mo free API credit | Sonar models auto-cite web sources")
+st.caption("Perplexity Pro = $5/mo free API | Sonar = web search + citations")
