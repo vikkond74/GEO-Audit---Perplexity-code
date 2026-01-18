@@ -1,5 +1,5 @@
-streamlit==1.38.0
-httpx==0.27.0
-beautifulsoup4==4.12.3
-tldextract==5.1.2
-openai==1.20.1
+streamlit
+httpx
+beautifulsoup4
+tldextract
+openai
