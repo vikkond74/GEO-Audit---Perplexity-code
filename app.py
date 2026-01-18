@@ -1,156 +1,125 @@
-import os
+import streamlit as st
 import asyncio
 import httpx
-import streamlit as st
 from bs4 import BeautifulSoup
-import tldextract
 from openai import AsyncOpenAI
+import tldextract
+
+# Page config
+st.set_page_config(page_title="🧠 GEO Audit", layout="wide")
 
 # Config
 client = AsyncOpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
-USER_AGENT = "GEO-Audit-Streamlit/1.0"
 
-# Helpers
-async def fetch_html(url: str, timeout: int = 10) -> str:
-    headers = {"User-Agent": USER_AGENT}
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        return resp.text
-
-def parse_basic_page_signals(html: str, url: str) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
-    title_tag = soup.find("title")
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    h1 = soup.find("h1")
-    faqs = soup.find_all(["details", "summary"])
-    schemas = [s.get_text(strip=True) for s in soup.find_all("script", type="application/ld+json")]
-    text = soup.get_text(separator=" ", strip=True)
-    return {
-        "url": url,
-        "title": title_tag.get_text(strip=True) if title_tag else None,
-        "meta_description": meta_desc.get("content").strip() if meta_desc else None,
-        "h1": h1.get_text(strip=True) if h1 else None,
-        "has_faq_like_elements": len(faqs) > 0,
-        "schema_blocks_count": len(schemas),
-        "text_snippet": text[:800],
-    }
-
-def get_domain_info(domain: str) -> dict:
-    """Simplified domain info (no whois)"""
-    ext = tldextract.extract(domain)
-    return {
-        "domain": f"{ext.domain}.{ext.suffix}",
-        "subdomain": ext.subdomain,
-        "tld": ext.suffix,
-    }
-
-async def generate_geo_audit(company_name: str, domain: str, page_signals: list[dict], domain_info: dict) -> str:
-    summary_lines = [f"- URL: {p['url']}\n  Title: {p.get('title')}\n  H1: {p.get('h1')}\n  Meta: {bool(p.get('meta_description'))}\n  FAQ: {p.get('has_faq_like_elements')}\n  Schema: {p.get('schema_blocks_count')}\n  Text: {p.get('text_snippet')}\n" for p in page_signals]
-    
-    messages = [
-        {"role": "system", "content": "You are a Generative Engine Optimization (GEO) expert. Audit sites for AI search readiness. Be concise and actionable."},
-        {"role": "user", "content": f"""
-Company: {company_name}
-Domain: {domain}
-Domain info: {domain_info}
-
-Page signals:
-{chr(10).join(summary_lines)}
-
-1. Assess GEO readiness (2-3 sentences).
-2. List 3-5 critical issues.
-3. Give 5-10 prioritized GEO recommendations.
-        """}
-    ]
-    
-    resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        max_tokens=1200,
-        temperature=0.3
-    )
-    return resp.choices[0].message.content
-
-# UI
-st.set_page_config(page_title="🧠 GEO Audit", layout="wide")
 st.title("🧠 Generative Engine Optimization Audit")
+st.markdown("Enter a domain → get GEO analysis powered by AI.")
 
 # Sidebar
 with st.sidebar:
     st.header("🔑 OpenAI API Key")
-    api_key = st.text_input("Paste your key here", type="password", help="Required for GEO analysis")
+    api_key = st.text_input("Paste your key", type="password", help="Required")
     if api_key:
         st.secrets["OPENAI_API_KEY"] = api_key
-        st.success("✅ Key saved!")
+        st.success("✅ Saved!")
+        st.rerun()
     else:
-        st.warning("⚠️ Add API key to enable full analysis")
+        st.warning("⚠️ Add key first")
 
-if st.button("🚀 Run GEO Audit", type="primary"):
-    if not st.secrets.get("OPENAI_API_KEY"):
-        st.error("⚠️ Add OpenAI API key in sidebar!")
-        st.stop()
-    
-    company_or_domain = st.text_input("Company/domain", value="perplexity.ai")
-    extra_urls_raw = st.text_area("Extra URLs (one per line)", height=80)
-    
+# Main app
+if "results" not in st.session_state:
+    st.session_state.results = None
+
+col1, col2 = st.columns([2, 1])
+with col1:
+    domain_input = st.text_input("Domain (e.g. perplexity.ai)", value="perplexity.ai")
+with col2:
+    if st.button("🚀 Run Audit", type="primary", use_container_width=True):
+        st.session_state.results = "running"
+
+if st.session_state.results == "running" and st.secrets.get("OPENAI_API_KEY"):
     try:
         # Resolve domain
-        value = company_or_domain.strip()
-        if value.startswith(("http://", "https://")):
-            domain_url = value
-        elif "." in value:
-            domain_url = "https://" + value
+        if not domain_input.startswith("http"):
+            domain_url = f"https://{domain_input.strip()}"
         else:
-            st.error("Enter domain like 'example.com'")
-            st.stop()
+            domain_url = domain_input.strip()
 
-        urls_to_check = [domain_url]
-        if extra_urls_raw.strip():
-            urls_to_check.extend([line.strip() for line in extra_urls_raw.splitlines() if line.strip()])
-
-        with st.spinner("🔍 Fetching pages..."):
-            tasks = [fetch_html(u) for u in urls_to_check[:5]]
-            html_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        page_signals = []
-        for url, html in zip(urls_to_check[:5], html_results):
-            if isinstance(html, Exception):
-                continue
-            sig = parse_basic_page_signals(html, url)
-            page_signals.append(sig)
-
-        if not page_signals:
-            st.error("No pages fetched.")
-            st.stop()
-
-        domain_info = get_domain_info(domain_url)
-
-        with st.spinner("🤖 Generating GEO audit..."):
-            geo_audit_text = await generate_geo_audit(
-                company_name=company_or_domain,
-                domain=domain_url,
-                page_signals=page_signals,
-                domain_info=domain_info,
-            )
-
-        # Results
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📊 GEO Audit Report")
-            st.markdown(geo_audit_text)
-        
-        with col2:
-            st.subheader("📈 Page Metrics")
-            for p in page_signals:
-                with st.expander(p["url"]):
-                    col_a, col_b, col_c = st.columns(3)
-                    col_a.metric("Schema", p["schema_blocks_count"])
-                    col_b.metric("FAQ", "✅" if p["has_faq_like_elements"] else "❌")
-                    col_c.metric("Meta", "✅" if p.get("meta_description") else "❌")
+        # Async fetch (wrapped properly)
+        @st.cache_data(ttl=300)
+        def fetch_pages(url):
+            async def _fetch():
+                urls = [url, f"{url.rstrip('/')}/about", f"{url.rstrip('/')}/blog"]
+                async with httpx.AsyncClient(follow_redirects=True) as client:
+                    results = await asyncio.gather(*[client.get(u, timeout=10) for u in urls], return_exceptions=True)
+                    return [(u, r.text if not isinstance(r, Exception) else None) for u, r in zip(urls, results)]
             
-            st.subheader("🔍 Domain Info")
-            st.json(domain_info)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_fetch())
+
+        page_data = fetch_pages(domain_url)
+        page_signals = []
+
+        for url, html in page_data:
+            if html:
+                soup = BeautifulSoup(html, "html.parser")
+                page_signals.append({
+                    "url": url,
+                    "title": soup.title.get_text(strip=True) if soup.title else "No title",
+                    "h1_count": len(soup.find_all("h1")),
+                    "schema_count": len(soup.find_all("script", {"type": "application/ld+json"})),
+                    "has_faq": bool(soup.find("details") or soup.find_all(string=lambda t: "faq" in t.lower())),
+                    "word_count": len(soup.get_text().split())
+                })
+
+        # Domain info
+        domain_info = tldextract.extract(domain_url)
+        
+        # LLM audit
+        @st.cache_data(ttl=1800)
+        def get_geo_audit(domain_url, page_signals, domain_info):
+            messages = [{
+                "role": "user", 
+                "content": f"""
+GEO Audit Request:
+
+Domain: {domain_url}
+Domain info: {domain_info._asdict()}
+Pages analyzed: {len(page_signals)}
+
+Page signals:
+{chr(10).join([f"- {p['url']}: schema={p['schema_count']}, H1s={p['h1_count']}, words={p['word_count']}, FAQ={p['has_faq']}" for p in page_signals])}
+
+Give:
+1. GEO readiness score (1-10)
+2. 3 critical issues
+3. 5 prioritized fixes
+                """
+            }]
+            
+            resp = client.chat.completions.create(model="gpt-4o-mini", messages=messages, max_tokens=1000)
+            return resp.choices[0].message.content
+
+        geo_report = get_geo_audit(domain_url, page_signals, domain_info)
+
+        # Display results
+        st.session_state.results = "done"
+
+        st.subheader("🤖 GEO Audit Report")
+        st.markdown(geo_report)
+
+        st.subheader("📊 Page Analysis")
+        for signal in page_signals:
+            with st.expander(signal["url"]):
+                st.json(signal)
+
+        st.subheader("🔍 Domain")
+        st.json({"domain": domain_info.domain, "tld": domain_info.suffix})
 
     except Exception as e:
         st.error(f"Error: {e}")
+        st.exception(e)
+        st.session_state.results = None
+
+elif not st.secrets.get("OPENAI_API_KEY"):
+    st.info("👈 Add your OpenAI API key in the sidebar to start!")
