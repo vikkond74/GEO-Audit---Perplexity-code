@@ -3,26 +3,20 @@ import asyncio
 import httpx
 import streamlit as st
 from bs4 import BeautifulSoup
-import whois
 import tldextract
-from openai import AsyncOpenAI  # CHANGE to your LLM provider
+from openai import AsyncOpenAI
 
-# Config (use Streamlit secrets)
-if "OPENAI_API_KEY" not in st.secrets:
-    st.secrets["OPENAI_API_KEY"] = ""  # user will add this
-
-client = AsyncOpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
+# Config
+client = AsyncOpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
 USER_AGENT = "GEO-Audit-Streamlit/1.0"
 
-# ---------- Helpers (same as before) ----------
+# Helpers
 async def fetch_html(url: str, timeout: int = 10) -> str:
     headers = {"User-Agent": USER_AGENT}
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         return resp.text
-
 
 def parse_basic_page_signals(html: str, url: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
@@ -42,32 +36,24 @@ def parse_basic_page_signals(html: str, url: str) -> dict:
         "text_snippet": text[:800],
     }
 
+def get_domain_info(domain: str) -> dict:
+    """Simplified domain info (no whois)"""
+    ext = tldextract.extract(domain)
+    return {
+        "domain": f"{ext.domain}.{ext.suffix}",
+        "subdomain": ext.subdomain,
+        "tld": ext.suffix,
+    }
 
-def get_domain_whois(domain: str) -> dict:
-    try:
-        w = whois.whois(domain)
-        return {
-            "domain_name": str(w.domain_name),
-            "registrar": getattr(w, 'registrar', None),
-            "creation_date": str(getattr(w, 'creation_date', None)),
-            "expiration_date": str(getattr(w, 'expiration_date', None)),
-            "country": getattr(w, 'country', None),
-        }
-    except:
-        return {}
-
-
-async def generate_geo_audit(company_name: str, domain: str, page_signals: list[dict], whois_info: dict) -> str:
+async def generate_geo_audit(company_name: str, domain: str, page_signals: list[dict], domain_info: dict) -> str:
     summary_lines = [f"- URL: {p['url']}\n  Title: {p.get('title')}\n  H1: {p.get('h1')}\n  Meta: {bool(p.get('meta_description'))}\n  FAQ: {p.get('has_faq_like_elements')}\n  Schema: {p.get('schema_blocks_count')}\n  Text: {p.get('text_snippet')}\n" for p in page_signals]
-    whois_summary = f"Domain WHOIS: {whois_info}\n" if whois_info else "Domain WHOIS: unavailable\n"
     
     messages = [
         {"role": "system", "content": "You are a Generative Engine Optimization (GEO) expert. Audit sites for AI search readiness. Be concise and actionable."},
         {"role": "user", "content": f"""
 Company: {company_name}
 Domain: {domain}
-
-{whois_summary}
+Domain info: {domain_info}
 
 Page signals:
 {chr(10).join(summary_lines)}
@@ -79,37 +65,34 @@ Page signals:
     ]
     
     resp = await client.chat.completions.create(
-        model="gpt-4o-mini",  # CHANGE to your model
+        model="gpt-4o-mini",
         messages=messages,
         max_tokens=1200,
         temperature=0.3
     )
     return resp.choices[0].message.content
 
-
-# ---------- Streamlit UI ----------
+# UI
 st.set_page_config(page_title="🧠 GEO Audit", layout="wide")
-
 st.title("🧠 Generative Engine Optimization Audit")
-st.markdown("Enter a domain to get a GEO-focused audit powered by LLM analysis.")
 
-# Sidebar for API key
+# Sidebar
 with st.sidebar:
-    st.header("🔑 API Key")
-    api_key = st.text_input("OpenAI API Key", type="password", help="Required for GEO analysis")
+    st.header("🔑 OpenAI API Key")
+    api_key = st.text_input("Paste your key here", type="password", help="Required for GEO analysis")
     if api_key:
         st.secrets["OPENAI_API_KEY"] = api_key
-        st.success("API key saved!")
+        st.success("✅ Key saved!")
     else:
-        st.warning("Add your API key to enable LLM analysis.")
-
-company_or_domain = st.text_input("Company or domain", value="perplexity.ai")
-extra_urls_raw = st.text_area("Optional extra URLs (one per line)", height=80)
+        st.warning("⚠️ Add API key to enable full analysis")
 
 if st.button("🚀 Run GEO Audit", type="primary"):
     if not st.secrets.get("OPENAI_API_KEY"):
-        st.error("⚠️ Add your OpenAI API key in the sidebar first!")
+        st.error("⚠️ Add OpenAI API key in sidebar!")
         st.stop()
+    
+    company_or_domain = st.text_input("Company/domain", value="perplexity.ai")
+    extra_urls_raw = st.text_area("Extra URLs (one per line)", height=80)
     
     try:
         # Resolve domain
@@ -119,7 +102,7 @@ if st.button("🚀 Run GEO Audit", type="primary"):
         elif "." in value:
             domain_url = "https://" + value
         else:
-            st.error("Please enter a domain like 'example.com'")
+            st.error("Enter domain like 'example.com'")
             st.stop()
 
         urls_to_check = [domain_url]
@@ -127,53 +110,47 @@ if st.button("🚀 Run GEO Audit", type="primary"):
             urls_to_check.extend([line.strip() for line in extra_urls_raw.splitlines() if line.strip()])
 
         with st.spinner("🔍 Fetching pages..."):
-            tasks = [fetch_html(u) for u in urls_to_check[:5]]  # limit to 5
+            tasks = [fetch_html(u) for u in urls_to_check[:5]]
             html_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         page_signals = []
         for url, html in zip(urls_to_check[:5], html_results):
             if isinstance(html, Exception):
-                st.warning(f"Failed to fetch {url}")
                 continue
             sig = parse_basic_page_signals(html, url)
             page_signals.append(sig)
 
         if not page_signals:
-            st.error("Could not fetch any pages.")
+            st.error("No pages fetched.")
             st.stop()
 
-        # WHOIS
-        ext = tldextract.extract(domain_url)
-        bare_domain = f"{ext.domain}.{ext.suffix}"
-        whois_info = get_domain_whois(bare_domain)
+        domain_info = get_domain_info(domain_url)
 
-        # GEO audit
         with st.spinner("🤖 Generating GEO audit..."):
             geo_audit_text = await generate_geo_audit(
                 company_name=company_or_domain,
                 domain=domain_url,
                 page_signals=page_signals,
-                whois_info=whois_info,
+                domain_info=domain_info,
             )
 
         # Results
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("📊 GEO Audit")
+            st.subheader("📊 GEO Audit Report")
             st.markdown(geo_audit_text)
         
         with col2:
-            st.subheader("📈 Page Signals")
+            st.subheader("📈 Page Metrics")
             for p in page_signals:
                 with st.expander(p["url"]):
-                    st.metric("Schema blocks", p["schema_blocks_count"])
-                    st.metric("Has FAQ-like", "✅" if p.get("has_faq_like_elements") else "❌")
-                    st.caption(f"**Title:** {p.get('title')[:100]}...")
-                    st.caption(f"**H1:** {p.get('h1')[:100]}...")
-
-            st.subheader("🔍 Domain WHOIS")
-            st.json(whois_info)
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.metric("Schema", p["schema_blocks_count"])
+                    col_b.metric("FAQ", "✅" if p["has_faq_like_elements"] else "❌")
+                    col_c.metric("Meta", "✅" if p.get("meta_description") else "❌")
+            
+            st.subheader("🔍 Domain Info")
+            st.json(domain_info)
 
     except Exception as e:
         st.error(f"Error: {e}")
-        st.exception(e)
