@@ -4,47 +4,49 @@ import tldextract
 
 st.set_page_config(page_title="🧠 Perplexity GEO Audit", layout="wide")
 
-st.title("🧠 Instant GEO Audit")
-st.markdown("Enter domain → Perplexity Sonar searches + audits → Fixes with citations")
+st.title("🧠 GEO Audit Tool")
+st.markdown("Perplexity API → Instant GEO recommendations with citations")
 
-# API key
 if "key" not in st.session_state:
     st.session_state.key = ""
 
 with st.sidebar:
-    st.header("🔑 Perplexity API")
-    key = st.text_input("API Key", value=st.session_state.key, type="password")
-    if st.button("Save") or key != st.session_state.key:
-        st.session_state.key = key
+    st.header("🔑 Perplexity API Key")
+    key_input = st.text_input("From perplexity.ai/settings/api", 
+                             value=st.session_state.key, type="password")
+    if st.button("✅ Save") or key_input != st.session_state.key:
+        st.session_state.key = key_input
         st.rerun()
     
     if st.session_state.key:
-        st.success("✅ Ready!")
-        st.caption("Get key: perplexity.ai/settings/api")
+        st.success("✅ Connected!")
+    else:
+        st.warning("⚠️ Add API key")
 
-domain = st.text_input("Domain", value="perplexity.ai")
-model = st.selectbox("Model", ["sonar-small-online", "sonar-medium-online"])
+domain = st.text_input("Domain to audit", value="perplexity.ai")
+model = st.selectbox("Model", [
+    "llama-3.1-sonar-small-128k-online",
+    "llama-3.1-sonar-large-128k-online", 
+    "llama-3.1-sonar-huge-128k-online",
+    "sonnet-4-mini", 
+    "gpt-4o-mini"
+])  # VALID models [web:81]
 
-if st.button("🚀 GEO Audit", type="primary") and st.session_state.key:
+if st.button("🚀 Run GEO Audit", type="primary") and st.session_state.key:
     
-    # Domain info
     parsed = tldextract.extract(domain)
-    domain_info = f"{parsed.domain}.{parsed.suffix}"
+    site = f"{parsed.domain}.{parsed.suffix}"
     
-    # Perplexity prompt (no crawling needed!)
-    prompt = f"""**Generative Engine Optimization (GEO) Audit**
+    prompt = f"""**GEO Audit for {site}**
 
-Target: {domain} ({domain_info})
+Complete Generative Engine Optimization analysis:
+1. **Score 1-10** (current GEO readiness)
+2. **Strengths** (2-3 bullets) 
+3. **Issues** (4-5 bullets)
+4. **Fixes** (6 numbered, specific: "Add FAQPage schema...")
+5. Cite sources
 
-Do a complete GEO audit:
-1. Check current SEO/GEO status via web search
-2. GEO Score 1-10  
-3. 3 Strengths
-4. 5 Critical issues  
-5. 8 Specific fixes (e.g. "Add Organization schema to homepage")
-6. Cite sources
-
-GEO priorities: schema markup, FAQ patterns, statistics/quotes, authoritative language, localBusiness clarity."""
+Check: schema markup, FAQ structure, entity signals, citations, statistics for LLMs."""
 
     headers = {
         "Authorization": f"Bearer {st.session_state.key}",
@@ -54,29 +56,32 @@ GEO priorities: schema markup, FAQ patterns, statistics/quotes, authoritative la
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 2000,
-        "temperature": 0.2,
+        "max_tokens": 1600,
+        "temperature": 0.1,
         "stream": False
     }
 
-    with st.spinner("🤖 Perplexity searching + analyzing..."):
-        resp = requests.post("https://api.perplexity.ai/chat/completions", 
-                           headers=headers, json=payload, timeout=25)
+    with st.spinner("🤖 Perplexity analyzing..."):
+        resp = requests.post("https://api.perplexity.ai/chat/completions",
+                           headers=headers, json=payload, timeout=30)
         
         if resp.status_code == 200:
-            report = resp.json()["choices"][0]["message"]["content"]
+            result = resp.json()["choices"][0]["message"]["content"]
             
-            st.subheader("📊 Perplexity GEO Report")
-            st.markdown(report)
+            st.subheader("📊 GEO Audit Report")
+            st.markdown(result)
             
-            st.subheader("🔍 Domain")
-            st.json({"domain": domain_info, "full": domain})
+            st.subheader("🔍 Site Info")
+            st.json({
+                "domain": site,
+                "model_used": model
+            })
             
         else:
-            st.error(f"API {resp.status_code}: {resp.text[:300]}")
-            st.json(payload)  # debug payload
+            st.error(f"API Error {resp.status_code}")
+            st.code(resp.text)
 else:
-    st.info("👈 Enter API key → Audit")
+    st.info("👈 Enter API key → Get audit")
 
 st.markdown("---")
-st.caption("🆓 Pro = $5/mo API credit | No crawling = instant results")
+st.caption("🆓 Pro = $5/mo credit | Models from docs.perplexity.ai")
